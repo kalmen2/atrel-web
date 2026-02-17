@@ -26,6 +26,7 @@ process.env.MONGODB_DB ||= runtimeConfig.mongodb?.db || runtimeConfig.mongo?.db;
 process.env.MONGODB_COLLECTION ||= runtimeConfig.mongodb?.collection || runtimeConfig.mongo?.collection;
 process.env.MONGODB_INVENTORY_COLLECTION ||= runtimeConfig.mongodb?.inventory_collection || runtimeConfig.mongo?.inventory_collection;
 process.env.MONGODB_PURCHASE_ORDERS_COLLECTION ||= runtimeConfig.mongodb?.purchase_orders_collection || runtimeConfig.mongo?.purchase_orders_collection;
+process.env.MONGODB_LATE_ORDERS_COLLECTION ||= runtimeConfig.mongodb?.late_orders_collection || runtimeConfig.mongo?.late_orders_collection;
 process.env.JWT_SECRET ||= runtimeConfig.jwt?.secret;
 process.env.GOOGLE_CLIENT_ID ||= runtimeConfig.google?.client_id;
 process.env.GOOGLE_CLIENT_SECRET ||= runtimeConfig.google?.client_secret;
@@ -52,6 +53,7 @@ app.use((req, res, next) => {
 });
 const client = new MongoClient(process.env.MONGODB_URI);
 const dbName = process.env.MONGODB_DB;
+const lateOrdersCollectionName = process.env.MONGODB_LATE_ORDERS_COLLECTION || 'late_orders_report';
 
 const requiredEnv = ['MONGODB_URI', 'MONGODB_DB', 'MONGODB_PURCHASE_ORDERS_COLLECTION'];
 const missingEnv = requiredEnv.filter((key) => !process.env[key]);
@@ -80,7 +82,8 @@ const ensureIndexes = async () => {
     db.collection('orders').createIndex({ tracking_number: 1 }),
     db.collection(process.env.MONGODB_PURCHASE_ORDERS_COLLECTION).createIndex({ supplier_name: 1 }),
     db.collection(process.env.MONGODB_PURCHASE_ORDERS_COLLECTION).createIndex({ new_po_status: 1 }),
-    db.collection(process.env.MONGODB_PURCHASE_ORDERS_COLLECTION).createIndex({ purchase_order_date: -1, _id: -1 })
+    db.collection(process.env.MONGODB_PURCHASE_ORDERS_COLLECTION).createIndex({ purchase_order_date: -1, _id: -1 }),
+    db.collection(lateOrdersCollectionName).createIndex({ report_date: -1 })
   ]);
   indexesReady = true;
 };
@@ -102,6 +105,26 @@ const REFRESH_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
 
 // In-memory rate limit for GoFlow orders refresh (2 minutes)
 let lastOrdersRefreshTime = 0;
+
+// In-memory status for late orders report generation
+let lateOrdersReportRunning = false;
+const LATE_ORDERS_REPORT_COOLDOWN_MS = 60 * 60 * 1000;
+
+const getLatestLateOrdersReportDate = async (db) => {
+  const names = [lateOrdersCollectionName, 'late_orders_report', 'late-orders-report'];
+  const uniqueNames = Array.from(new Set(names));
+  let latest = null;
+  for (const name of uniqueNames) {
+    const doc = await db.collection(name).findOne({}, { sort: { report_date: -1 }, projection: { report_date: 1 } });
+    if (doc?.report_date) {
+      const ts = new Date(doc.report_date).getTime();
+      if (!Number.isNaN(ts) && (latest === null || ts > latest)) {
+        latest = ts;
+      }
+    }
+  }
+  return latest;
+};
 
 // Endpoint to update pallet_amount and box_amount for a delivery group
 app.post('/api/delivery-amounts', asyncHandler(async (req, res) => {
@@ -193,6 +216,47 @@ app.post('/api/refresh-orders', asyncHandler(async (req, res) => {
   res.json({ success: true, message: 'GoFlow orders update started.' });
 }));
 
+// Endpoint to trigger lateOrders.js report generation
+app.post('/api/refresh-late-orders-report', asyncHandler(async (req, res) => {
+  await ensureIndexes();
+  if (lateOrdersReportRunning) {
+    return res.status(409).json({ error: 'Late orders report is already running.' });
+  }
+  const db = await getDb();
+  const latestReportTs = await getLatestLateOrdersReportDate(db);
+  if (latestReportTs) {
+    const now = Date.now();
+    const elapsed = now - latestReportTs;
+    if (elapsed < LATE_ORDERS_REPORT_COOLDOWN_MS) {
+      const waitSeconds = Math.ceil((LATE_ORDERS_REPORT_COOLDOWN_MS - elapsed) / 1000);
+      const minutes = Math.floor(waitSeconds / 60);
+      const seconds = waitSeconds % 60;
+      return res.status(429).json({
+        error: `Please wait ${minutes} minute${minutes !== 1 ? 's' : ''} ${seconds} second${seconds !== 1 ? 's' : ''} before generating a new report.`
+      });
+    }
+  }
+  lateOrdersReportRunning = true;
+  const child = spawn('node', ['lateOrders.js'], {
+    cwd: __dirname,
+    stdio: 'ignore',
+    detached: true
+  });
+  child.on('exit', () => {
+    lateOrdersReportRunning = false;
+  });
+  child.on('error', () => {
+    lateOrdersReportRunning = false;
+  });
+  child.unref();
+  res.json({ success: true, message: 'Late orders report generation started.' });
+}));
+
+// Late orders report status
+app.get('/api/late-orders-report/status', asyncHandler(async (req, res) => {
+  res.json({ running: lateOrdersReportRunning });
+}));
+
 // Fetch orders by tag (from frontend)
 app.post('/api/orders-due-by', asyncHandler(async (req, res) => {
   await ensureIndexes();
@@ -204,6 +268,39 @@ app.post('/api/orders-due-by', asyncHandler(async (req, res) => {
     const payload = err.response?.data || { error: err.message };
     return res.status(status).json(payload);
   }
+}));
+
+// Get latest late orders report
+app.get('/api/late-orders-report', asyncHandler(async (req, res) => {
+  await ensureIndexes();
+  const db = await getDb();
+  const primaryCollection = db.collection(lateOrdersCollectionName);
+  let report = await primaryCollection.findOne({}, { sort: { report_date: -1 } });
+  if (!report) {
+    const fallbackNames = ['late_orders_report', 'late-orders-report'].filter(name => name !== lateOrdersCollectionName);
+    for (const name of fallbackNames) {
+      const fallback = db.collection(name);
+      report = await fallback.findOne({}, { sort: { report_date: -1 } });
+      if (report) break;
+    }
+  }
+  if (!report) {
+    return res.json({ report: null });
+  }
+  return res.json(report);
+}));
+
+// Debug: show late orders report collection counts
+app.get('/api/late-orders-report/debug', asyncHandler(async (req, res) => {
+  await ensureIndexes();
+  const db = await getDb();
+  const names = [lateOrdersCollectionName, 'late_orders_report', 'late-orders-report'];
+  const uniqueNames = Array.from(new Set(names));
+  const counts = {};
+  for (const name of uniqueNames) {
+    counts[name] = await db.collection(name).countDocuments();
+  }
+  res.json({ db: dbName, collections: counts });
 }));
 // Get all purchase orders
 app.get('/api/purchase-orders', asyncHandler(async (req, res) => {

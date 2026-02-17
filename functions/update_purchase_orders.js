@@ -5,18 +5,18 @@ import dotenv from 'dotenv';
 import { resolve } from 'path';
 dotenv.config({ path: resolve(process.cwd(), '.env') });
 
-const url = 'https://host.mapleprime.com/api/v1/purchase-order/product/bulk-download';
+const GOFLOW_API_KEY = process.env.GOFLOW_API_KEY;
+const GOFLOW_BASE_URL = process.env.GOFLOW_BASE_URL;
+const magento_url = 'https://host.mapleprime.com/api/v1/purchase-order/product/bulk-download';
+let gf_url = `${GOFLOW_BASE_URL}/purchasing/purchase-orders?filters[status]=awaiting_receipt`;
 const MONGO_URI = process.env.MONGODB_URI;
 const DB_NAME = process.env.MONGODB_DB;
 const COLLECTION = process.env.MONGODB_PURCHASE_ORDERS_COLLECTION;
 const magento_api_key = process.env.MAGENTO_API_KEY;
-// Store in MongoDB
 const client = new MongoClient(MONGO_URI);
 await client.connect();
 const db = client.db(DB_NAME);
 const collection = db.collection(COLLECTION);
-const GOFLOW_API_KEY = process.env.GOFLOW_API_KEY;
-const GOFLOW_BASE_URL = process.env.GOFLOW_BASE_URL;
 const GOFLOW_HEADERS = {
   Authorization: `Bearer ${GOFLOW_API_KEY}`,
   'X-Beta-Contact': 'kalmi@atrelgroup.com',
@@ -25,13 +25,12 @@ const GOFLOW_HEADERS = {
 
 async function fetchMagentoPOs() {
   try {
-    // Fetch CSV from Magento bulk-download endpoint
     const https = await import('https');
     const { parse } = await import('csv-parse/sync');
-    
-    function fetchCSV(url, magento_api_key) {
+
+    function fetchCSV(magento_url, magento_api_key) {
       return new Promise((resolve, reject) => {
-        https.get(url, { headers: { 'X-API-KEY': magento_api_key } }, (res) => {
+        https.get(magento_url, { headers: { 'X-API-KEY': magento_api_key } }, (res) => {
           let data = '';
           res.on('data', chunk => data += chunk);
           res.on('end', () => resolve(data));
@@ -40,7 +39,7 @@ async function fetchMagentoPOs() {
       });
     }
     
-    const csvData = await fetchCSV(url, magento_api_key);
+    const csvData = await fetchCSV(magento_url, magento_api_key);
     const records = parse(csvData, { columns: true, skip_empty_lines: true });
     console.log(`Parsed ${records.length} records from CSV.`);
     // Build maps for all statuses
@@ -51,7 +50,7 @@ async function fetchMagentoPOs() {
       const poNum = row.purchase_order_number;
       const status = row.purchase_order_status;
       if (!poNum) return;
-      if (status === 'waiting_for_supplier' || status === 'exported_to_goflow') {
+      if (status === 'waiting_for_supplier') {
         const supplier = row.supplier_name || '';
         let date = row.purchase_order_date || '';
         if (date && dayjs(date).isValid()) {
@@ -93,11 +92,10 @@ async function fetchMagentoPOs() {
 
 
 async function fetchGoFlowPOs() {
-  let url = `${GOFLOW_BASE_URL}purchasing/purchase-orders?filters[status]=awaiting_receipt`;
   let allPOs = [];
   try {
-    while (url) {
-      const res = await axios.get(url, { headers: GOFLOW_HEADERS, timeout: 15000 });
+    while (gf_url) {
+      const res = await axios.get(gf_url, { headers: GOFLOW_HEADERS, timeout: 15000 });
       const data = res.data;
       const items = Array.isArray(data.data) ? data.data : [];
       for (const item of items) {
@@ -117,11 +115,10 @@ async function fetchGoFlowPOs() {
           new_po_status: item.status,
           supplier_name: item.vendor?.name || null,
           purchase_order_date: poDate,
-          items
+          items: item.lines
         });
       }
-      // Pagination: GoFlow uses data.next for next page
-      url = data.next || null;
+      gf_url = data.next || null;
     }
     // // Deduplicate by purchase_order_number
     const poMap = {};

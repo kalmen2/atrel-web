@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useCallback, useEffect } from 'react';
 import { IconButton, Tooltip, Popover, Typography as MuiTypography } from '@mui/material';
 import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
 import { Box, Button, CircularProgress, Typography, Alert } from '@mui/material';
@@ -8,83 +8,153 @@ import { API_BASE } from './apiConfig.js';
 export default function LateOrdersPage() {
 	const [rows, setRows] = useState([]);
 	const [itemRows, setItemRows] = useState([]);
-	const [showNeedsOrderOnly, setShowNeedsOrderOnly] = useState(false);
+	const [summary, setSummary] = useState(null);
+	const [reportDate, setReportDate] = useState(null);
+	const [showOnHandOnly, setShowOnHandOnly] = useState(false);
+	const [showItemsShortOnly, setShowItemsShortOnly] = useState(false);
 	const [loading, setLoading] = useState(false);
+	const [generating, setGenerating] = useState(false);
 	const [error, setError] = useState('');
-	const [viewMode, setViewMode] = useState('items'); // 'orders' or 'items'
+	const [statusMessage, setStatusMessage] = useState('');
+	const [detailsAnchorEl, setDetailsAnchorEl] = useState(null);
+	const [detailsRows, setDetailsRows] = useState([]);
+	const [detailsItemNumber, setDetailsItemNumber] = useState('');
 
-	const orderColumns = useMemo(
-		() => [
-			{ field: 'order_number', headerName: 'Order #', width: 180 },
-			{ field: 'status', headerName: 'Status', width: 120 },
-			{ field: 'latest_ship', headerName: 'Latest Ship', width: 170 },
-			{ field: 'total_items', headerName: 'Items', width: 90 },
-			{ field: 'item_numbers', headerName: 'Item Numbers', width: 240 }
-		],
-		[]
-	);
+	const handleDetailsClose = () => {
+		setDetailsAnchorEl(null);
+		setDetailsRows([]);
+		setDetailsItemNumber('');
+	};
+	const detailsOpen = Boolean(detailsAnchorEl);
 
 	const itemColumns = useMemo(
 		() => [
 			{ field: 'item_number', headerName: 'Item Number', width: 180 },
-			{ field: 'total_quantity', headerName: 'Total Quantity', width: 140 },
-			{ field: 'on_purchase_order', headerName: 'On Purchase Order', width: 160 },
+			{ field: 'units_due', headerName: 'Units Due', width: 120 },
 			{ field: 'on_hand', headerName: 'On Hand', width: 120 },
+			{
+				field: 'awaiting_goflow',
+				headerName: 'Awaiting GoFlow',
+				width: 160,
+				align: 'left',
+				renderCell: (params) => {
+					const value = Number(params.value || 0);
+					const details = params.row?.awaiting_goflow_details || [];
+					if (value > 0 && details.length > 0) {
+						return (
+							<Box
+								component="span"
+								onClick={(event) => {
+									setDetailsAnchorEl(event.currentTarget);
+									setDetailsRows(details);
+									setDetailsItemNumber(params.row?.item_number || '');
+								}}
+								sx={{
+									cursor: 'pointer',
+									color: '#1976d2',
+									textDecoration: 'underline',
+									'&:hover': { color: '#1565c0' }
+								}}
+							>
+								{value}
+							</Box>
+						);
+					}
+					return value;
+				}
+			},
+			{ field: 'awaiting_fba', headerName: 'Awaiting FBA', width: 140 },
+			{ field: 'awaiting_total', headerName: 'Awaiting Total', width: 140 }
 			
 		],
 		[]
 	);
 
-	const normalizeOrders = (data) => {
-		if (Array.isArray(data)) return data;
-		if (Array.isArray(data?.orders)) return data.orders;
-		if (Array.isArray(data?.data)) return data.data;
-		if (Array.isArray(data?.results)) return data.results;
-		return [];
-	};
-
-	const fetchOrders = async () => {
+	const fetchOrders = useCallback(async () => {
 		setLoading(true);
 		setError('');
+		setStatusMessage('');
+		setRows([]);
+		setItemRows([]);
+		setSummary(null);
+		setReportDate(null);
 		try {
-			const res = await fetch(`${API_BASE}/api/orders-due-by`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' }
-			});
+			const statusRes = await fetch(`${API_BASE}/api/late-orders-report/status`);
+			if (statusRes.ok) {
+				const statusData = await statusRes.json();
+				if (statusData?.running) {
+					setStatusMessage('Report is currently being generated. Please wait...');
+					return;
+				}
+			}
+			const res = await fetch(`${API_BASE}/api/late-orders-report`);
 			const data = await res.json();
 			if (!res.ok) {
 				throw new Error(data?.error || 'Failed to fetch orders.');
 			}
-			const orders = normalizeOrders(data);
-			// Add id field for DataGrid
-			const rowsWithId = orders.map((order, index) => ({
-				...order,
-				id: order.id || order._id || order.order_id || `${order.order_number || 'order'}-${index}`,
-			}));
-			setRows(rowsWithId);
-			// Handle item_totals
-			let itemTotals = Array.isArray(data.item_totals)
-				? data.item_totals.map((item, index) => ({
-					...item,
-					id: item.item_number || index
-				}))
+			const report = data?.report === null ? null : (data?.report || data);
+			if (!report) {
+				return;
+			}
+			setSummary(report.summary || null);
+			setReportDate(report.report_date || null);
+			
+			let itemTotals = Array.isArray(report.items)
+				? report.items.map((item, index) => {
+					const awaitingGoflow = Number(item.awaiting_goflow || 0);
+					const awaitingFba = Number(item.awaiting_fba || 0);
+					return {
+						...item,
+						awaiting_total: awaitingGoflow + awaitingFba,
+						id: item.item_number || index
+					};
+				})
 				: [];
 			// Sort so warning rows appear first
 			itemTotals = itemTotals.sort((a, b) => {
-				const aWarn = typeof a.on_purchase_order === 'number' && typeof a.total_quantity === 'number' && a.on_purchase_order < a.total_quantity;
-				const bWarn = typeof b.on_purchase_order === 'number' && typeof b.total_quantity === 'number' && b.on_purchase_order < b.total_quantity;
+				const aDue = Number(a.units_due || 0);
+				const bDue = Number(b.units_due || 0);
+				const aAvail = Number(a.on_hand || 0) + Number(a.awaiting_total || 0);
+				const bAvail = Number(b.on_hand || 0) + Number(b.awaiting_total || 0);
+				const aWarn = aAvail < aDue;
+				const bWarn = bAvail < bDue;
 				if (aWarn === bWarn) return 0;
 				return aWarn ? -1 : 1;
 			});
 			setItemRows(itemTotals);
 		} catch (err) {
 			setError(err.message || 'Failed to fetch orders.');
-			setRows([]);
-			setItemRows([]);
 		} finally {
 			setLoading(false);
 		}
-	};
+	}, []);
+
+	const generateReport = useCallback(async () => {
+		setGenerating(true);
+		setError('');
+		setStatusMessage('');
+		try {
+			const res = await fetch(`${API_BASE}/api/refresh-late-orders-report`, { method: 'POST' });
+			const data = await res.json();
+			if (!res.ok) {
+				const message = data?.error || 'Failed to generate report.';
+				setStatusMessage(message);
+				return;
+			}
+			setStatusMessage('Report is currently being generated. Please wait...');
+			setTimeout(() => {
+				fetchOrders();
+			}, 3000);
+		} catch (err) {
+			setError(err.message || 'Failed to generate report.');
+		} finally {
+			setGenerating(false);
+		}
+	}, [fetchOrders]);
+
+	useEffect(() => {
+		fetchOrders();
+	}, [fetchOrders]);
 
 	const [helpAnchorEl, setHelpAnchorEl] = useState(null);
 	const handleHelpOpen = (event) => setHelpAnchorEl(event.currentTarget);
@@ -92,15 +162,21 @@ export default function LateOrdersPage() {
 	const helpOpen = Boolean(helpAnchorEl);
 
 	// Filtered item rows for 'items' view
-	const filteredItemRows = showNeedsOrderOnly
-		? itemRows.filter(row => {
-				const total = typeof row.total_quantity === 'number' ? row.total_quantity : Number(row.total_quantity) || 0;
-				const po = typeof row.on_purchase_order === 'number' ? row.on_purchase_order : Number(row.on_purchase_order) || 0;
-				let hand = typeof row.on_hand === 'number' ? row.on_hand : Number(row.on_hand) || 0;
-				if (hand < 0) hand = 0;
-				return (po + hand) < total;
-			})
-		: itemRows;
+	const filteredItemRows = itemRows.filter(row => {
+		if (showOnHandOnly) {
+			let hand = Number(row.on_hand || 0);
+			if (hand < 0) hand = 0;
+			if (hand <= 0) return false;
+		}
+		if (showItemsShortOnly) {
+			const total = Number(row.units_due || 0);
+			let hand = Number(row.on_hand || 0);
+			if (hand < 0) hand = 0;
+			const available = hand + Number(row.awaiting_total || 0);
+			if (available >= total) return false;
+		}
+		return true;
+	});
 
 	return (
 		<Box sx={{ p: 2, height: '100%', display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -138,61 +214,122 @@ export default function LateOrdersPage() {
 					<Button variant="contained" onClick={fetchOrders} disabled={loading}>
 						Fetch
 					</Button>
+					<Button variant="outlined" onClick={generateReport} disabled={generating}>
+						{generating ? 'Generating…' : 'Generate Report'}
+					</Button>
 					{loading && <CircularProgress size={22} />}
-					<Box sx={{ minWidth: 180 }}>
-						<select
-							value={viewMode}
-							onChange={e => setViewMode(e.target.value)}
-							style={{ padding: '8px', fontSize: '16px', borderRadius: '4px', border: '1px solid #ccc' }}
-						>
-							<option value="orders">See Orders</option>
-							<option value="items">See Items</option>
-						</select>
-					</Box>
 				</Box>
 			</Box>
 			{error && <Alert severity="error">{error}</Alert>}
-			{viewMode === 'items' && (
-				<Box sx={{ mb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
-					<input
-						type="checkbox"
-						id="needsOrderOnly"
-						checked={showNeedsOrderOnly}
-						onChange={e => setShowNeedsOrderOnly(e.target.checked)}
-						style={{ marginRight: 6 }}
-					/>
-					<label htmlFor="needsOrderOnly" style={{ fontSize: 14, userSelect: 'none', cursor: 'pointer' }}>
-						Show only items that need to be ordered
-					</label>
+			{statusMessage && <Alert severity="info">{statusMessage}</Alert>}
+			{summary && (
+				<Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2, bgcolor: '#f8fafc', p: 2, borderRadius: 2, border: '1px solid #e2e8f0' }}>
+					<Box>
+						<Typography variant="subtitle2" color="text.secondary">Report Date</Typography>
+						<Typography variant="body1" sx={{ fontWeight: 600 }}>
+							{reportDate ? new Date(reportDate).toLocaleString() : 'N/A'}
+						</Typography>
+					</Box>
+					<Box>
+						<Typography variant="subtitle2" color="text.secondary">Total Due Orders</Typography>
+						<Typography variant="body1" sx={{ fontWeight: 600 }}>{summary.total_due_orders_amount}</Typography>
+					</Box>
+					<Box>
+						<Typography variant="subtitle2" color="text.secondary">Total Items Due</Typography>
+						<Typography variant="body1" sx={{ fontWeight: 600 }}>{summary.total_items_due}</Typography>
+					</Box>
+					<Box>
+						<Typography variant="subtitle2" color="text.secondary">Total Units Due</Typography>
+						<Typography variant="body1" sx={{ fontWeight: 600 }}>{summary.total_units_due}</Typography>
+					</Box>
+					<Box
+						role="button"
+						onClick={() => {
+							setShowOnHandOnly(prev => {
+								const next = !prev;
+								if (next) setShowItemsShortOnly(false);
+								return next;
+							});
+						}}
+						sx={{
+							cursor: 'pointer',
+							borderRadius: 1,
+							px: 1,
+							py: 0.5,
+							bgcolor: showOnHandOnly ? '#e3f2fd' : 'transparent',
+							'&:hover': { bgcolor: '#e3f2fd' }
+						}}
+					>
+						<Typography variant="subtitle2" color="text.secondary">Total On Hand</Typography>
+						<Typography variant="body1" sx={{ fontWeight: 600 }}>{summary.total_on_hand}</Typography>
+					</Box>
+					<Box>
+						{/* <Typography variant="subtitle2" color="text.secondary">Total Awaiting</Typography> */}
+						<Typography variant="body1" sx={{ fontWeight: 600 }}>{summary.total_awaiting}</Typography>
+					</Box>
+					<Box
+						role="button"
+						onClick={() => {
+							setShowItemsShortOnly(prev => {
+								const next = !prev;
+								if (next) setShowOnHandOnly(false);
+								return next;
+							});
+						}}
+						sx={{
+							cursor: 'pointer',
+							borderRadius: 1,
+							px: 1,
+							py: 0.5,
+							bgcolor: showItemsShortOnly ? '#e3f2fd' : 'transparent',
+							'&:hover': { bgcolor: '#e3f2fd' }
+						}}
+					>
+						<Typography variant="subtitle2" color="text.secondary">Items Short</Typography>
+						<Typography variant="body1" sx={{ fontWeight: 600 }}>{summary.total_items_short}</Typography>
+						{/* <Typography variant="caption" color="text.secondary">Click to filter</Typography> */}
+					</Box>
 				</Box>
 			)}
+			<Box sx={{ mb: 1 }} />
 			<Box sx={{ flex: 1, minHeight: 0 }}>
 				<CompactDataGrid
-					rows={viewMode === 'orders' ? rows : filteredItemRows}
-					columns={viewMode === 'orders' ? orderColumns : itemColumns}
+					rows={filteredItemRows}
+					columns={itemColumns}
 					loading={loading}
 					pageSizeOptions={[20, 50, 100]}
 					initialPageSize={20}
 					rowHeight={39}
 					sx={{
 						background: '#fff',
-						fontSize: '13px',
-						'& .item-warning-row': {
-							backgroundColor: '#ffebee',
-						},
+						fontSize: '13px'
 					}}
-					getRowClassName={viewMode === 'items' ? (params => {
-						if (
-							typeof params.row.on_purchase_order === 'number' &&
-							typeof params.row.total_quantity === 'number' &&
-							params.row.on_purchase_order < params.row.total_quantity
-						) {
-							return 'item-warning-row';
-						}
-						return '';
-					}) : undefined}
 				/>
 			</Box>
+			<Popover
+				open={detailsOpen}
+				anchorEl={detailsAnchorEl}
+				onClose={handleDetailsClose}
+				anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+				transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+				PaperProps={{ sx: { p: 2, minWidth: 260 } }}
+			>
+				<Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
+					Awaiting GoFlow POs{detailsItemNumber ? ` • ${detailsItemNumber}` : ''}
+				</Typography>
+				{detailsRows.length === 0 ? (
+					<Typography variant="body2">No PO details.</Typography>
+				) : (
+					<Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+						{detailsRows.map((row) => (
+							<Box key={`${row.purchase_order_number}-${row.qty}`} sx={{ display: 'flex', justifyContent: 'space-between', gap: 2 }}>
+								<Typography variant="body2">{row.purchase_order_number}</Typography>
+								<Typography variant="body2" sx={{ fontWeight: 600 }}>{row.qty}</Typography>
+							</Box>
+						))}
+					</Box>
+				)}
+			</Popover>
 		</Box>
 	);
 }

@@ -1,8 +1,6 @@
-.DS_Store
 node_modules/
-**/node_modules/
-frontend/dist/
-functions/node_modules/
 .env
-functions/.env
-frontend/.env
+*.log
+.DS_Store
+frontend/dist/
+.firebase/

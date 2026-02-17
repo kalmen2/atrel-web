@@ -1,6 +1,16 @@
 import 'dotenv/config';
 import axios from 'axios';
 import { MongoClient } from 'mongodb';
+import { dirname } from 'path';
+import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
+import fs from 'fs';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const envPath = `${__dirname}/../.env`;
+if (fs.existsSync(envPath)) {
+  dotenv.config({ path: envPath });
+}
 
 const BASE_URL = process.env.GOFLOW_BASE_URL;
 const API_KEY = process.env.GOFLOW_API_KEY;
