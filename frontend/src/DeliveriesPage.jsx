@@ -153,9 +153,28 @@ export default function DeliveriesPage() {
                           />
                           <IconButton
                             sx={{ ml: 1 }}
-                            onClick={e => {
+                            onClick={async (e) => {
                               setPopoverAnchor(e.currentTarget);
-                              setPopoverPOs(row.po_numbers || []);
+                              const poNumbers = row.po_numbers || [];
+                              if (poNumbers.length === 0) {
+                                setPopoverPOs([]);
+                                return;
+                              }
+                              try {
+                                const res = await fetch(`${API_BASE}/api/purchase-orders/by-po-numbers`, {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ po_numbers: poNumbers })
+                                });
+                                const data = await res.json();
+                                if (res.ok) {
+                                  setPopoverPOs(data.orders || []);
+                                } else {
+                                  setPopoverPOs(poNumbers.map(po => ({ purchase_order_number: po, supplier_po_number: '' })));
+                                }
+                              } catch {
+                                setPopoverPOs(poNumbers.map(po => ({ purchase_order_number: po, supplier_po_number: '' })));
+                              }
                             }}
                             color="primary"
                           >
@@ -196,7 +215,12 @@ export default function DeliveriesPage() {
               <ListItem><ListItemText primary="No POs" /></ListItem>
             ) : (
               popoverPOs.map(po => (
-                <ListItem key={po}><ListItemText primary={po} /></ListItem>
+                <ListItem key={po.purchase_order_number}>
+                  <ListItemText
+                    primary={po.purchase_order_number}
+                    secondary={po.supplier_po_number ? `Supplier PO: ${po.supplier_po_number}` : 'Supplier PO: —'}
+                  />
+                </ListItem>
               ))
             )}
           </List>
@@ -205,7 +229,8 @@ export default function DeliveriesPage() {
               variant="contained"
               size="small"
               onClick={() => {
-                const row = deliveries.find(d => d.po_numbers && d.po_numbers.length && d.po_numbers.every(po => popoverPOs.includes(po)) && popoverPOs.every(po => d.po_numbers.includes(po)));
+                const popoverPoNumbers = popoverPOs.map(po => po.purchase_order_number);
+                const row = deliveries.find(d => d.po_numbers && d.po_numbers.length && d.po_numbers.every(po => popoverPoNumbers.includes(po)) && popoverPoNumbers.every(po => d.po_numbers.includes(po)));
                 if (row) {
                   const printWindow = window.open('', '', 'width=600,height=600');
                   printWindow.document.write('<html><head><title>Delivery Sheet</title>');
@@ -217,7 +242,12 @@ export default function DeliveriesPage() {
                   printWindow.document.write(`<div class="subtitle">Pallets:</div> ${row.pallet_amount}<br/>`);
                   printWindow.document.write(`<div class="subtitle">Boxes:</div> ${row.box_amount}<br/>`);
                   printWindow.document.write(`<div class="subtitle">POs:</div><ul>`);
-                  if (row.po_numbers && row.po_numbers.length > 0) {
+                  if (popoverPOs.length > 0) {
+                    popoverPOs.forEach(po => {
+                      const supplierText = po.supplier_po_number ? ` — Supplier PO: ${po.supplier_po_number}` : '';
+                      printWindow.document.write(`<li>${po.purchase_order_number}${supplierText}</li>`);
+                    });
+                  } else if (row.po_numbers && row.po_numbers.length > 0) {
                     row.po_numbers.forEach(po => {
                       printWindow.document.write(`<li>${po}</li>`);
                     });

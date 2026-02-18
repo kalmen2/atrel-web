@@ -10,6 +10,7 @@ import ExpandLess from '@mui/icons-material/ExpandLess';
 import ExpandMore from '@mui/icons-material/ExpandMore';
 // import WorkersProgressPage from './WorkersProgressPage.jsx';
 import DeliveriesPage from './DeliveriesPage.jsx';
+import LogsPage from './LogsPage.jsx';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import OrdersPage from './OrdersPage.jsx';
 import PurchaseOrdersPage from './PurchaseOrdersPage.jsx';
@@ -29,6 +30,7 @@ export default function SidebarLayout() {
   const [expanded, setExpanded] = useState(true);
   const [page, setPage] = useState('orders');
   const [goflowOpen, setGoflowOpen] = useState(true);
+  const [fbaOpen, setFbaOpen] = useState(true);
 
   return (
     <ThemeProvider theme={theme}>
@@ -63,6 +65,7 @@ export default function SidebarLayout() {
           </Toolbar>
           <Divider />
           <List>
+            {/* GoFlow Dropdown */}
             <ListItemButton onClick={() => setGoflowOpen((open) => !open)}>
               <ListItemIcon>
                 <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAMAAABF0y+mAAAAaVBMVEX////Hzv52if5GZP5BYP5edv6ksP78/P+yvP5nff5DYv5rgP64wf54i/47W/6Ck/5Sbf7h5f/y8/9Xcf5LZ/58jv73+P+NnP7Cyv49Xf7P1f84Wf6ImP6dqv6ptP5Oaf7q7P+Tov7s7v+cC22mAAAAt0lEQVR4AeXOxQHEMAwEwA2zwox2/z0G5GALd/MxCPFXNN0wLdvBwfVMPwhxi8jU44TMFMhyKsrSIKuCUlJ9FDUlgKR1sbPJAuv6AZeRQrCJXD4HqnCq2gCnWZUmfNT6zpu941AlDud42AVGUSRJMRc7TlbB0uSDB3W45AkfDdlgC3l8fj49tVmaUAqEXKyZhQNW5WSNU0m9BmQ9BbYdkJHiYhd935YLdllt9r0vKrxki4PLIvFzNq+CCd8ZjE52AAAAAElFTkSuQmCC" alt="GoFlow" style={{ height: 28, width: 28, objectFit: 'contain' }} />
@@ -85,17 +88,34 @@ export default function SidebarLayout() {
                 </ListItemButton>
               </List>
             </Collapse>
-            {/* <ListItemButton selected={page === 'workers'} onClick={() => setPage('workers')}>
-              <ListItemIcon><GroupIcon /></ListItemIcon>
-              {expanded && <ListItemText primary="Workers Progress" />}
-            </ListItemButton> */}
-            <ListItemButton selected={page === 'purchaseOrders'} onClick={() => setPage('purchaseOrders')}>
-              <ListItemIcon><AssignmentIcon /></ListItemIcon>
-              {expanded && <ListItemText primary="Purchase Orders" />}
+
+            {/* FBA Dropdown */}
+            <ListItemButton onClick={() => setFbaOpen((open) => !open)}>
+              <ListItemIcon>
+                <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAMAAABF0y+mAAAAb1BMVEUjLz4hLT0aKDgTIzQYJjceLD0dKjpJU2CJj5ewtLnBxMiAh448R1UsOEaZnqTr6+37/Pz////e3+F1e4W2ur/y8/R2fYbIzNCipqwmM0IKHTAuOkk5Q1C6vcFWXmjk5uhBS1dja3XS1dcBGSxscnpdT9IHAAAA20lEQVR4Ab3SRwKDIBAFUIGhYwF7r/c/YyA7xWzz7T6lJ/8IQr8EE6AUCHshhrmQSkltAEWWZnlhfQpXPv9FaRXky/VTSRPetp2q/bXq7wUP/seiG4deenTTHUHMqlqAkcaXvG6PcvtxmjAdjXhDRPo9U4fL7QvC0taFDYkR9u8vsumKGEnrreXDecXINv+u1pAwHSPsodALEtT5m5zjCGtBzmW1PmKIirUuE86G5IZFDbJFYWsXcLoh5ocNcTtvbWvgsQxMGF0xEbyIDUezTTDFYY0w8Kc4KPlPPogUEo39Mf5QAAAAAElFTkSuQmCC" alt="FBA" style={{ height: 28, width: 28, objectFit: 'contain' }} />
+              </ListItemIcon>
+              {expanded && <ListItemText primary="FBA" />}
+              {expanded && (fbaOpen ? <ExpandLess /> : <ExpandMore />)}
             </ListItemButton>
-            <ListItemButton selected={page === 'deliveries'} onClick={() => setPage('deliveries')}>
-              <ListItemIcon><InboxIcon /></ListItemIcon>
-              {expanded && <ListItemText primary="Deliveries" />}
+            <Collapse in={fbaOpen} timeout="auto" unmountOnExit>
+              <List component="div" disablePadding>
+                <ListItemButton sx={{ pl: expanded ? 4 : 2 }} selected={page === 'purchaseOrders'} onClick={() => setPage('purchaseOrders')}>
+                  <ListItemIcon><AssignmentIcon /></ListItemIcon>
+                  {expanded && <ListItemText primary="Purchase Orders" />}
+                </ListItemButton>
+                <ListItemButton sx={{ pl: expanded ? 4 : 2 }} selected={page === 'deliveries'} onClick={() => setPage('deliveries')}>
+                  <ListItemIcon><InboxIcon /></ListItemIcon>
+                  {expanded && <ListItemText primary="Deliveries" />}
+                </ListItemButton>
+              </List>
+            </Collapse>
+            
+            {/* Logs Page (not in dropdown) */}
+            <ListItemButton selected={page === 'logs'} onClick={() => setPage('logs')}>
+              <ListItemIcon>
+                <span role="img" aria-label="Logs">📝</span>
+              </ListItemIcon>
+              {expanded && <ListItemText primary="Logs" />}
             </ListItemButton>
           </List>
         </Drawer>
@@ -117,6 +137,7 @@ export default function SidebarLayout() {
           {page === 'purchaseOrders' && <PurchaseOrdersPage />}
           {page === 'deliveries' && <DeliveriesPage key={page} />}
           {page === 'lateOrders' && <LateOrdersPage />}
+          {page === 'logs' && <LogsPage />}
         </Box>
       </Box>
     </ThemeProvider>

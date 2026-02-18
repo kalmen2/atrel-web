@@ -1,7 +1,7 @@
 // anything complete in magento remove from purchase orders page
 
 import React, { useEffect, useState } from 'react';
-import { Box, IconButton, Popover, Select, MenuItem, Tooltip, Button, CircularProgress, Menu, Dialog, DialogTitle, DialogContent, DialogActions } from '@mui/material';
+import { Box, IconButton, Popover, Select, MenuItem, Tooltip, Button, CircularProgress, Menu, Dialog, DialogTitle, DialogContent, DialogActions, TextField } from '@mui/material';
 import CalendarMonthIcon from '@mui/icons-material/CalendarMonth';
 import ArrowDropDownIcon from '@mui/icons-material/ArrowDropDown';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
@@ -21,6 +21,7 @@ export default function PurchaseOrdersPage() {
   const [editingEtaId, setEditingEtaId] = useState(null);
   const [anchorEl, setAnchorEl] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [updatingPurchaseOrders, setUpdatingPurchaseOrders] = useState(false);
   const [bulkStatus, setBulkStatus] = useState('');
   const [bulkEtaValue, setBulkEtaValue] = useState('');
   const [bulkUpdating, setBulkUpdating] = useState(false);
@@ -51,23 +52,34 @@ export default function PurchaseOrdersPage() {
     setLoading(false);
   };
 
-    // Handler for the top-level refresh button
-    const handleTopRefresh = async () => {
-      setRefreshing(true);
-      try {
-        const res = await fetch(`${API_BASE}/api/refresh-purchase-orders`, { method: 'POST' });
-        const data = await res.json();
-        if (!res.ok) {
-          alert(data.error || 'Refresh failed');
-        } else {
-          // Wait a moment for backend to update, then reload orders
-          setTimeout(reloadOrders, 1200);
-        }
-      } catch {
-        alert('Refresh failed');
+  // Handler for the top-level refresh button (reload only)
+  const handleTopRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await reloadOrders();
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const handleUpdatePurchaseOrders = async () => {
+    console.log('[purchase-orders] Update POs clicked');
+    setUpdatingPurchaseOrders(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/refresh-purchase-orders`, { method: 'POST' });
+      const data = await res.json();
+      console.log('[purchase-orders] refresh response', { status: res.status, data });
+      if (!res.ok) {
+        alert(data.error || 'Update failed');
+      } else {
+        setTimeout(reloadOrders, 1200);
       }
-      setTimeout(() => setRefreshing(false), 1800);
-    };
+    } catch (err) {
+      console.error('[purchase-orders] refresh error', err);
+      alert('Update failed');
+    }
+    setTimeout(() => setUpdatingPurchaseOrders(false), 1800);
+  };
 
   useEffect(() => {
     setPaginationModel((prev) => ({ ...prev, page: 0 }));
@@ -102,6 +114,19 @@ export default function PurchaseOrdersPage() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status })
+    });
+    await reloadOrders();
+  };
+
+  const updateOrderField = (id, field, value) => {
+    setOrders(prev => prev.map(order => order.id === id ? { ...order, [field]: value } : order));
+  };
+
+  const handleSupplierPoSave = async (id, supplierPoNumber) => {
+    await fetch(`${API_BASE}/api/purchase-orders/${id}/supplier-po-number`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ supplier_po_number: supplierPoNumber })
     });
     await reloadOrders();
   };
@@ -159,6 +184,27 @@ export default function PurchaseOrdersPage() {
 
   const columns = [
     { field: 'purchase_order_number', headerName: 'PO Number', width: 200 },
+    {
+      field: 'supplier_po_number',
+      headerName: 'Supplier PO #',
+      width: 140,
+      renderCell: (params) => (
+        <Box sx={{ display: 'flex', alignItems: 'flex-end', height: '100%', width: '100%' }}>
+          <TextField
+            value={params.value || ''}
+            size="small"
+            variant="standard"
+            onChange={(e) => updateOrderField(params.row.id, 'supplier_po_number', e.target.value)}
+            onBlur={(e) => {
+              const newValue = e.target.value.trim();
+              handleSupplierPoSave(params.row.id, newValue);
+            }}
+            placeholder="Enter #"
+            sx={{ width: '80%', pb: 0.5 }}
+          />
+        </Box>
+      )
+    },
     { field: 'purchase_order_date', headerName: 'Purchase Order Date', width: 180 },
     {
       field: 'new_po_status',
@@ -340,6 +386,16 @@ export default function PurchaseOrdersPage() {
               Actions ({selectedIds.length})
             </Button>
           )}
+          <Button
+            variant="outlined"
+            size="small"
+            onClick={handleUpdatePurchaseOrders}
+            disabled={updatingPurchaseOrders}
+            startIcon={updatingPurchaseOrders ? <CircularProgress size={16} color="inherit" /> : <span role="img" aria-label="refresh">🔄</span>}
+            sx={{ minWidth: 110, textTransform: 'none' }}
+          >
+            Update POs
+          </Button>
           <Button
           variant="contained"
           color="primary"

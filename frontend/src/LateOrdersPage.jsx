@@ -52,7 +52,6 @@ export default function LateOrdersPage() {
 								sx={{
 									cursor: 'pointer',
 									color: '#1976d2',
-									textDecoration: 'underline',
 									'&:hover': { color: '#1565c0' }
 								}}
 							>
@@ -63,7 +62,36 @@ export default function LateOrdersPage() {
 					return value;
 				}
 			},
-			{ field: 'awaiting_fba', headerName: 'Awaiting FBA', width: 140 },
+			{
+				field: 'awaiting_fba',
+				headerName: 'Awaiting FBA',
+				width: 140,
+				align: 'left',
+				renderCell: (params) => {
+					const value = Number(params.value || 0);
+					const details = params.row?.awaiting_fba_details || [];
+					if (value > 0 && details.length > 0) {
+						return (
+							<Box
+								component="span"
+								onClick={(event) => {
+									setDetailsAnchorEl(event.currentTarget);
+									setDetailsRows(details);
+									setDetailsItemNumber(params.row?.item_number || '');
+								}}
+								sx={{
+									cursor: 'pointer',
+									color: '#1976d2',
+									'&:hover': { color: '#1565c0' }
+								}}
+							>
+								{value}
+							</Box>
+						);
+					}
+					return value;
+				}
+			},
 			{ field: 'awaiting_total', headerName: 'Awaiting Total', width: 140 }
 			
 		],
