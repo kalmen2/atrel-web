@@ -11,6 +11,8 @@
     "lint": "echo 'No lint script needed for Firebase deployment.'"
   },
   "dependencies": {
+    "@hookform/resolvers": "^5.2.2",
+    "@mui/x-data-grid": "^8.27.1",
     "axios": "^1.13.4",
     "bcryptjs": "^2.4.3",
     "compression": "^1.8.1",
@@ -24,6 +26,8 @@
     "google-auth-library": "^10.5.0",
     "jsonwebtoken": "^9.0.2",
     "mongodb": "^5.9.2",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "react-hook-form": "^7.71.1",
+    "yup": "^1.7.1"
   }
 }

@@ -134,6 +134,25 @@ async function fetchGoFlowPOs() {
   }
 }
 
+// Helper to log function runs to function_logs
+async function logFunctionRun({ message, level = 'info', meta = {} }) {
+  try {
+    const mongoClient = new MongoClient(MONGO_URI);
+    await mongoClient.connect();
+    const db = mongoClient.db(DB_NAME);
+    await db.collection('function_logs').insertOne({
+      message,
+      level,
+      meta,
+      timestamp: new Date()
+    });
+    await mongoClient.close();
+  } catch (e) {
+    // Logging failure should not crash the main job
+    console.error('Failed to log function run:', e.message);
+  }
+}
+
 async function fetchAndStorePOs() {
   try {
     // Fetch from both sources
@@ -166,6 +185,11 @@ async function fetchAndStorePOs() {
     console.log(`Found ${uniquePOs.length} unique purchase orders to upsert.`);
     // Upsert into MongoDB (insert or update)
     for (const po of uniquePOs) {
+      // Preserve delivery_method if it exists in DB
+      const existing = await collection.findOne({ purchase_order_number: po.purchase_order_number });
+      if (existing && existing.delivery_method) {
+        po.delivery_method = existing.delivery_method;
+      }
       await collection.updateOne(
         { purchase_order_number: po.purchase_order_number },
         { $set: po },
@@ -175,8 +199,11 @@ async function fetchAndStorePOs() {
     }
     await client.close();
     console.log("Purchase orders updated.");
+    await logFunctionRun({ message: 'update_purchase_orders.js completed successfully', level: 'info' });
   } catch (err) {
     console.error("Error:", err);
+    if (err?.response?.status === 429) return;
+    await logFunctionRun({ message: 'update_purchase_orders.js failed: ' + err.message, level: 'error' });
   }
 }
 

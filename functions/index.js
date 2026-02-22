@@ -10,6 +10,7 @@ import { config as firebaseConfig } from 'firebase-functions';
 import { dirname } from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { fetchOrdersDueBy } from './goFlow/goflow_orders_due_by.js';
+import { scheduledLateOrders, scheduledUpdatePurchaseOrders } from './scheduledJobs.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -35,6 +36,15 @@ process.env.MAGENTO_API_KEY ||= runtimeConfig.magento?.api_key;
 process.env.GOFLOW_API_KEY ||= runtimeConfig.goflow?.api_key;
 process.env.GOFLOW_BASE_URL ||= runtimeConfig.goflow?.base_url;
 process.env.MAPLEPRIME_API_KEY ||= runtimeConfig.mapleprime?.api_key;
+const lateOrdersCollectionName = process.env.MONGODB_LATE_ORDERS_COLLECTION || 'late_orders_report';
+const client = new MongoClient(process.env.MONGODB_URI);
+const dbName = process.env.MONGODB_DB;
+const requiredEnv = ['MONGODB_URI', 'MONGODB_DB', 'MONGODB_PURCHASE_ORDERS_COLLECTION'];
+const missingEnv = requiredEnv.filter((key) => !process.env[key]);
+if (missingEnv.length > 0) {
+  console.error(`Missing required env vars: ${missingEnv.join(', ')}`);
+  process.exit(1);
+}
 const app = express();
 app.use(cors());
 
@@ -51,16 +61,7 @@ app.use((req, res, next) => {
   });
   next();
 });
-const client = new MongoClient(process.env.MONGODB_URI);
-const dbName = process.env.MONGODB_DB;
-const lateOrdersCollectionName = process.env.MONGODB_LATE_ORDERS_COLLECTION || 'late_orders_report';
 
-const requiredEnv = ['MONGODB_URI', 'MONGODB_DB', 'MONGODB_PURCHASE_ORDERS_COLLECTION'];
-const missingEnv = requiredEnv.filter((key) => !process.env[key]);
-if (missingEnv.length > 0) {
-  console.error(`Missing required env vars: ${missingEnv.join(', ')}`);
-  process.exit(1);
-}
 
 let db;
 let indexesReady = false;
@@ -139,8 +140,8 @@ app.post('/api/delivery-amounts', asyncHandler(async (req, res) => {
   const db = await getDb();
   const deliveries = db.collection('deliveries');
   const update = {};
-  if (pallet_amount) update.pallet_amount = pallet_amount;
-  if (box_amount) update.box_amount = box_amount;
+  if (pallet_amount !== undefined) update.pallet_amount = pallet_amount === '' ? 0 : pallet_amount;
+  if (box_amount !== undefined) update.box_amount = box_amount === '' ? 0 : box_amount;
   const filter = delivery_id ? { _id: new ObjectId(delivery_id) } : { supplier_name, eta };
   const result = await deliveries.updateOne(filter, { $set: update });
   if (result.matchedCount === 0) {
@@ -189,13 +190,20 @@ app.post('/api/refresh-purchase-orders', asyncHandler(async (req, res) => {
     return res.status(429).json({ error: `Please wait ${wait} seconds before refreshing again.` });
   }
   lastPurchaseOrderRefreshTime = now;
+  const isLocalRun = !process.env.K_SERVICE && !process.env.FUNCTION_TARGET;
   const child = spawn('node', ['update_purchase_orders.js'], {
     cwd: __dirname,
-    stdio: 'ignore',
-    detached: true
+    stdio: isLocalRun ? 'inherit' : 'ignore',
+    detached: false
   });
-  child.unref();
-  res.json({ success: true, message: 'Purchase order update started.' });
+  console.log('[refresh-purchase-orders] Spawned update_purchase_orders.js', { pid: child.pid });
+  child.on('close', (code) => {
+    if (code === 0) {
+      res.json({ success: true, message: 'Purchase order update finished.' });
+    } else {
+      res.status(500).json({ success: false, error: 'Script exited with code ' + code });
+    }
+  });
 }));
 
 // Endpoint to trigger goflow_orders_sync.js
@@ -307,9 +315,9 @@ app.get('/api/purchase-orders', asyncHandler(async (req, res) => {
   await ensureIndexes();
   const db = await getDb();
   const collection = db.collection(process.env.MONGODB_PURCHASE_ORDERS_COLLECTION);
-  const filter = { new_po_status: { $ne: 'complete' } };
-  // Filter by status (new_po_status)
-  if (req.query.status) {
+  let filter = {};
+  // Filter by status (new_po_status) only if set
+  if (req.query.status && req.query.status !== '') {
     filter.new_po_status = req.query.status;
   }
   // Filter by vendor (supplier_name)
@@ -336,6 +344,27 @@ app.get('/api/purchase-orders', asyncHandler(async (req, res) => {
   res.json({ orders, total, page, limit });
 }));
 
+// Get supplier PO numbers for a list of PO numbers
+app.post('/api/purchase-orders/by-po-numbers', asyncHandler(async (req, res) => {
+  await ensureIndexes();
+  const { po_numbers } = req.body;
+  if (!Array.isArray(po_numbers) || po_numbers.length === 0) {
+    return res.status(400).json({ error: 'po_numbers array is required' });
+  }
+  const db = await getDb();
+  const collection = db.collection(process.env.MONGODB_PURCHASE_ORDERS_COLLECTION);
+  const docs = await collection.find(
+    { purchase_order_number: { $in: po_numbers } },
+    { projection: { _id: 0, purchase_order_number: 1, supplier_po_number: 1 } }
+  ).toArray();
+  const map = new Map(docs.map(doc => [doc.purchase_order_number, doc.supplier_po_number || '']));
+  const orders = po_numbers.map(po => ({
+    purchase_order_number: po,
+    supplier_po_number: map.get(po) || ''
+  }));
+  res.json({ orders });
+}));
+
 // Update ETA for a purchase order
 app.post('/api/purchase-orders/:id/eta', asyncHandler(async (req, res) => {
   await ensureIndexes();
@@ -346,6 +375,25 @@ app.post('/api/purchase-orders/:id/eta', asyncHandler(async (req, res) => {
   if (!isValidObjectId(id)) return res.status(400).json({ error: 'Invalid id' });
   if (!eta) return res.status(400).json({ error: 'ETA is required' });
 
+  // Find PO before updating
+  const poBefore = await collection.findOne({ _id: new ObjectId(id) });
+  if (!poBefore) return res.status(404).json({ error: 'Purchase order not found' });
+  const poNumber = poBefore.purchase_order_number;
+  const supplierName = poBefore.supplier_name;
+
+  // Remove this PO from all delivery groups (regardless of eta or supplier)
+  if (poNumber) {
+    const db = await getDb();
+    const deliveries = db.collection('deliveries');
+    const removeResult = await deliveries.updateMany(
+      { po_numbers: poNumber },
+      { $pull: { po_numbers: poNumber } }
+    );
+    // Clean up empty delivery groups
+    const deleteResult = await deliveries.deleteMany({ po_numbers: { $size: 0 } });
+  }
+
+  // Update ETA
   const result = await collection.updateOne(
     { _id: new ObjectId(id) },
     { $set: { eta } }
@@ -353,26 +401,19 @@ app.post('/api/purchase-orders/:id/eta', asyncHandler(async (req, res) => {
   if (result.matchedCount === 0) {
     return res.status(404).json({ error: 'Purchase order not found' });
   }
-  // Find PO number and supplier_name for this PO
-  const po = await collection.findOne({ _id: new ObjectId(id) });
-  if (po && po.purchase_order_number && po.supplier_name) {
-    await upsertDeliveryGroup(po.supplier_name, eta, po.purchase_order_number);
+  // Add PO to new delivery group
+  if (poNumber && supplierName) {
+    await upsertDeliveryGroup(supplierName, eta, poNumber);
   }
   res.json({ success: true });
-  // ...existing code...
 }));
 // Endpoint to get all deliveries
 app.get('/api/deliveries', asyncHandler(async (req, res) => {
   await ensureIndexes();
-  // const now = Date.now();
-  // if (cache.deliveries.data && cache.deliveries.expiresAt > now) {
-  //   return res.json({ deliveries: cache.deliveries.data, cached: true });
-  // }
   const db = await getDb();
   const deliveries = await db.collection('deliveries')
     .find({ status: { $ne: 'complete' } })
     .toArray();
-  // cache.deliveries = { data: deliveries, expiresAt: now + CACHE_TTL_MS };
   res.json({ deliveries });
 }));
 // Remove ETA for a purchase order
@@ -409,6 +450,27 @@ app.delete('/api/purchase-orders/:id/eta', asyncHandler(async (req, res) => {
     });
   }
   
+  res.json({ success: true });
+}));
+
+// Update supplier PO number for a purchase order
+app.post('/api/purchase-orders/:id/supplier-po-number', asyncHandler(async (req, res) => {
+  await ensureIndexes();
+  const db = await getDb();
+  const collection = db.collection(process.env.MONGODB_PURCHASE_ORDERS_COLLECTION);
+  const { id } = req.params;
+  const { supplier_po_number } = req.body;
+  if (!isValidObjectId(id)) return res.status(400).json({ error: 'Invalid id' });
+  if (supplier_po_number === undefined) return res.status(400).json({ error: 'supplier_po_number is required' });
+
+  const update = supplier_po_number ? { $set: { supplier_po_number } } : { $unset: { supplier_po_number: "" } };
+  const result = await collection.updateOne(
+    { _id: new ObjectId(id) },
+    update
+  );
+  if (result.matchedCount === 0) {
+    return res.status(404).json({ error: 'Purchase order not found' });
+  }
   res.json({ success: true });
 }));
 
@@ -498,6 +560,14 @@ app.get('/api/users', asyncHandler(async (req, res) => {
   res.json({ users });
 }));
 
+// Logs endpoint for frontend logs page
+app.get('/api/logs', asyncHandler(async (req, res) => {
+  await ensureIndexes();
+  const db = await getDb();
+  const logs = await db.collection('function_logs').find({}).sort({ timestamp: -1 }).limit(100).toArray();
+  res.json({ logs });
+}));
+
 app.use((err, req, res, next) => {
   console.error(err);
   res.status(500).json({ error: 'Internal server error' });
@@ -510,6 +580,51 @@ const shutdown = async () => {
     process.exit(0);
   }
 };
+
+// Get all delivery methods
+app.get('/api/delivery-methods', asyncHandler(async (req, res) => {
+  await ensureIndexes();
+  const db = await getDb();
+  const methods = await db.collection('delivery_methods').find({}).sort({ name: 1 }).toArray();
+  res.json({ methods: methods.map(m => m.name) });
+}));
+
+// Add a new delivery method
+app.post('/api/delivery-methods', asyncHandler(async (req, res) => {
+  await ensureIndexes();
+  const db = await getDb();
+  const { method } = req.body;
+  if (!method || typeof method !== 'string' || !method.trim()) {
+    return res.status(400).json({ error: 'Method is required' });
+  }
+  const name = method.trim();
+  const exists = await db.collection('delivery_methods').findOne({ name });
+  if (exists) {
+    return res.status(409).json({ error: 'Method already exists' });
+  }
+  await db.collection('delivery_methods').insertOne({ name });
+  res.json({ success: true });
+}));
+
+// Update delivery method for a purchase order
+app.post('/api/purchase-orders/:id/delivery-method', asyncHandler(async (req, res) => {
+  await ensureIndexes();
+  const db = await getDb();
+  const collection = db.collection(process.env.MONGODB_PURCHASE_ORDERS_COLLECTION);
+  const { id } = req.params;
+  const { delivery_method } = req.body;
+  if (!isValidObjectId(id)) return res.status(400).json({ error: 'Invalid id' });
+  if (!delivery_method) return res.status(400).json({ error: 'Delivery method is required' });
+
+  const result = await collection.updateOne(
+    { _id: new ObjectId(id) },
+    { $set: { delivery_method } }
+  );
+  if (result.matchedCount === 0) {
+    return res.status(404).json({ error: 'Purchase order not found' });
+  }
+  res.json({ success: true });
+}));
 
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
@@ -534,4 +649,6 @@ if (!isFirebaseRuntime && isDirectRun) {
 ensureIndexes().catch((err) => {
   console.error('Failed to create indexes', err);
 });
+
+export { scheduledLateOrders, scheduledUpdatePurchaseOrders } from './scheduledJobs.js';
 

@@ -19,6 +19,25 @@ const GOFLOW_HEADERS = {
 
 const WAREHOUSE_ID = '07a215d8-3244-4b7b-beda-d81ddbef5fb6';
 
+// Helper to log function runs to function_logs
+async function logFunctionRun({ message, level = 'info', meta = {} }) {
+  try {
+    const mongoClient = new MongoClient(MONGO_URI);
+    await mongoClient.connect();
+    const db = mongoClient.db(DB_NAME);
+    await db.collection('function_logs').insertOne({
+      message,
+      level,
+      meta,
+      timestamp: new Date()
+    });
+    await mongoClient.close();
+  } catch (e) {
+    // Logging failure should not crash the main job
+    console.error('Failed to log function run:', e.message);
+  }
+}
+
 async function fetchOpenOrdersByStores() {
 	let url = `${GOFLOW_BASE_URL}/orders?filters[status:not]=shipped&filters[status:not]=canceled&filters[store.id]=1002&filters[store.id]=1003`;
 	const allOrders = [];
@@ -153,6 +172,7 @@ async function run() {
 			let awaitingGoflow = 0;
 			let awaitingFBA = 0;
 			const awaitingGoflowByPo = {};
+			const awaitingFbaByPo = {};
 			
 			for (const po of purchaseOrders) {
 				const poItems = po.items || [];
@@ -173,6 +193,10 @@ async function run() {
 							const poNumber = po.purchase_order_number || 'unknown';
 							awaitingGoflowByPo[poNumber] = (awaitingGoflowByPo[poNumber] || 0) + awaiting.goflow;
 						}
+						if (awaiting.fba > 0) {
+							const poNumber = po.purchase_order_number || 'unknown';
+							awaitingFbaByPo[poNumber] = (awaitingFbaByPo[poNumber] || 0) + awaiting.fba;
+						}
 					}
 				}
 			}
@@ -191,6 +215,10 @@ async function run() {
 				purchase_order_number,
 				qty
 			}));
+			const awaitingFbaDetails = Object.entries(awaitingFbaByPo).map(([purchase_order_number, qty]) => ({
+				purchase_order_number,
+				qty
+			}));
 			itemsData.push({
 				item_number: item.item_number || 'unknown',
 				product_id: item.product_id,
@@ -198,7 +226,8 @@ async function run() {
 				on_hand: onHand,
 				awaiting_goflow: awaitingGoflow,
 				awaiting_fba: awaitingFBA,
-				awaiting_goflow_details: awaitingGoflowDetails
+				awaiting_goflow_details: awaitingGoflowDetails,
+				awaiting_fba_details: awaitingFbaDetails
 			});
 			
 			console.log(`Item ${item.item_number || 'unknown'} (product ${item.product_id})`);
@@ -241,9 +270,12 @@ async function run() {
 		console.log("=".repeat(60));
 		
 		await mongoClient.close();
+		await logFunctionRun({ message: 'lateOrders.js completed successfully', level: 'info' });
 	} catch (err) {
 		console.error('Failed to fetch open orders:', err.message);
 		if (mongoClient) await mongoClient.close();
+		if (err?.response?.status === 429) return;
+		await logFunctionRun({ message: 'lateOrders.js failed: ' + err.message, level: 'error' });
 		process.exit(1);
 	}
 }
