@@ -30,11 +30,6 @@ export default function PurchaseOrdersPage() {
   const [etaDialogOpen, setEtaDialogOpen] = useState(false);
   const [rowMenuAnchor, setRowMenuAnchor] = useState(null);
   const [selectedRowId, setSelectedRowId] = useState(null);
-  const statusStaleHours = {
-    'awaiting payment': 48,
-    'in packing': 72,
-    default: 72
-  };
   // Helper to reload orders (used after refresh and mutations)
   const reloadOrders = async (page = paginationModel.page, pageSize = paginationModel.pageSize) => {
     setLoading(true);
@@ -62,6 +57,15 @@ export default function PurchaseOrdersPage() {
     }
   };
 
+  const handleDeliveryMethodSave = async (id, deliveryMethod) => {
+    await fetch(`${API_BASE}/api/purchase-orders/${id}/delivery-method`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ delivery_method: deliveryMethod })
+    });
+    await reloadOrders();
+  };
+
   const handleUpdatePurchaseOrders = async () => {
     console.log('[purchase-orders] Update POs clicked');
     setUpdatingPurchaseOrders(true);
@@ -72,13 +76,13 @@ export default function PurchaseOrdersPage() {
       if (!res.ok) {
         alert(data.error || 'Update failed');
       } else {
-        setTimeout(reloadOrders, 1200);
+        await reloadOrders();
       }
     } catch (err) {
       console.error('[purchase-orders] refresh error', err);
       alert('Update failed');
     }
-    setTimeout(() => setUpdatingPurchaseOrders(false), 1800);
+    setUpdatingPurchaseOrders(false);
   };
 
   useEffect(() => {
@@ -142,20 +146,6 @@ export default function PurchaseOrdersPage() {
       })
     ));
     setBulkUpdating(false);
-    clearFn('');
-    setSelectedIds([]);
-    await reloadOrders();
-  };
-
-  const handleBulkRemoveEta = async () => {
-    if (selectedIds.length === 0) return;
-    setBulkUpdating(true);
-    await Promise.all(selectedIds.map(id => 
-      fetch(`${API_BASE}/api/purchase-orders/${id}/eta`, {
-        method: 'DELETE'
-      })
-    ));
-    setBulkUpdating(false);
     setSelectedIds([]);
     await reloadOrders();
   };
@@ -172,14 +162,6 @@ export default function PurchaseOrdersPage() {
       method: 'DELETE'
     });
     await reloadOrders();
-  };
-
-  const isStatusStale = (row) => {
-    const status = row?.new_po_status || '';
-    const lastUpdated = row?.status_last_updated;
-    if (!status || !lastUpdated) return false;
-    const hoursLimit = statusStaleHours[status] ?? statusStaleHours.default;
-    return dayjs().diff(dayjs(lastUpdated), 'hour') > hoursLimit;
   };
 
   const columns = [
@@ -206,35 +188,67 @@ export default function PurchaseOrdersPage() {
       )
     },
     { field: 'purchase_order_date', headerName: 'Purchase Order Date', width: 180 },
+    { field: 'supplier_name', headerName: 'Vendor', width: 180 },
+    {
+      field: 'delivery_method',
+      headerName: 'Delivery Method',
+      width: 180,
+      renderCell: (params) => (
+        <Box sx={{ display: 'flex', alignItems: 'flex-end', height: '100%', width: '100%' }}>
+          <Select
+            value={params.value || ''}
+            size="small"
+            variant="standard"
+            onChange={e => handleDeliveryMethodChange(params.row.id, e.target.value)}
+            displayEmpty
+            sx={{ width: '80%', pb: 0.5 }}
+          >
+            {deliveryMethods.map(method => (
+              <MenuItem key={method} value={method}>{method}</MenuItem>
+            ))}
+            <MenuItem value="__add__" style={{ fontStyle: 'italic', color: '#1976d2' }}>+ Add method</MenuItem>
+          </Select>
+        </Box>
+      )
+    },
+    
     {
       field: 'new_po_status',
       headerName: 'Status',
       width: 200,
       renderCell: (params) => {
+        const status = params.row.new_po_status || params.value || '';
         const etaSet = Boolean(params.row.eta);
-        const currentStatus = params.row.new_po_status || params.value || '';
-        if (etaSet) {
+        // Map backend statuses
+        const displayStatus =
+          status === 'complete' ? 'complete' :
+          etaSet ? 'ETA confirmed' :
+          (status === 'waiting_for_supplier' || status === 'awaiting_receipt') ? 'PO Sent' :
+          status === 'paid' ? 'paid' : status;
+
+        // If ETA confirmed or complete, show label only
+        if (displayStatus === 'ETA confirmed') {
           return <span style={{ color: '#388e3c', fontWeight: 500 }}>ETA confirmed</span>;
         }
+        if (displayStatus === 'complete') {
+          return <span style={{ color: '#1976d2', fontWeight: 700 }}>complete</span>;
+        }
+
+        // Otherwise show dropdown
         return (
           <Select
-            value={currentStatus}
+            value={displayStatus === 'PO Sent' ? 'waiting_for_supplier' : displayStatus}
             size="small"
-            onChange={e => handleStatusChange(params.row.id, e.target.value)}
+            onChange={e => {
+              let value = e.target.value;
+              if (value === 'waiting_for_supplier' || value === 'awaiting_receipt') value = 'waiting_for_supplier';
+              handleStatusChange(params.row.id, value);
+            }}
             sx={{ minWidth: 180, maxWidth: 180, height: 28, fontSize: '0.85rem', '& .MuiSelect-select': { py: '6px', fontSize: '0.85rem' } }}
             MenuProps={{ PaperProps: { sx: { maxHeight: 160, minWidth: 120 } } }}
           >
-            {/* Show current status at the top if not one of the selectable options */}
-            {!(currentStatus === 'awaiting payment' || currentStatus === 'in packing' || currentStatus === 'ETA confirmed') && currentStatus && (
-              <MenuItem value={currentStatus} disabled sx={{ fontSize: '0.85rem', py: 0.5 }}>{currentStatus}</MenuItem>
-            )}
-            <MenuItem value="awaiting payment" sx={{ fontSize: '0.85rem', py: 0.5 }}>awaiting payment</MenuItem>
-            <MenuItem value="in packing" sx={{ fontSize: '0.85rem', py: 0.5 }}>in packing</MenuItem>
-            <Tooltip title="Add ETA in column" arrow placement="right">
-              <span>
-                <MenuItem value="ETA confirmed" disabled sx={{ fontSize: '0.85rem', py: 0.5, color: '#90caf9' }}>ETA confirmed</MenuItem>
-              </span>
-            </Tooltip>
+            <MenuItem value="waiting_for_supplier" sx={{ fontSize: '0.85rem', py: 0.5 }}>PO Sent</MenuItem>
+            <MenuItem value="paid" sx={{ fontSize: '0.85rem', py: 0.5 }}>paid</MenuItem>
           </Select>
         );
       }
@@ -269,7 +283,7 @@ export default function PurchaseOrdersPage() {
         );
       }
     },
-    { field: 'supplier_name', headerName: 'Vendor', width: 180 },
+    
     {
       field: 'eta',
       headerName: 'ETA',
@@ -343,6 +357,54 @@ export default function PurchaseOrdersPage() {
   }, {});
   const vendorOptions = Object.keys(vendorCounts).sort((a, b) => a.localeCompare(b));
 
+  // Add this state for delivery methods
+  const [deliveryMethods, setDeliveryMethods] = useState([]);
+  const [addMethodOpen, setAddMethodOpen] = useState(false);
+  const [newMethod, setNewMethod] = useState('');
+  const [pendingRowId, setPendingRowId] = useState(null);
+
+  // Fetch delivery methods from backend on mount
+  useEffect(() => {
+    const fetchMethods = async () => {
+      const res = await fetch(`${API_BASE}/api/delivery-methods`);
+      const data = await res.json();
+      setDeliveryMethods(data.methods || []);
+    };
+    fetchMethods();
+  }, []);
+
+  const handleDeliveryMethodChange = (id, value) => {
+    if (value === '__add__') {
+      setPendingRowId(id);
+      setAddMethodOpen(true);
+    } else {
+      updateOrderField(id, 'delivery_method', value);
+      handleDeliveryMethodSave(id, value);
+    }
+  };
+
+  const handleAddMethod = async () => {
+    if (newMethod && !deliveryMethods.includes(newMethod)) {
+      // Save new method to backend
+      await fetch(`${API_BASE}/api/delivery-methods`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ method: newMethod })
+      });
+      // Refetch methods
+      const res = await fetch(`${API_BASE}/api/delivery-methods`);
+      const data = await res.json();
+      setDeliveryMethods(data.methods || []);
+      if (pendingRowId) {
+        updateOrderField(pendingRowId, 'delivery_method', newMethod);
+        handleDeliveryMethodSave(pendingRowId, newMethod);
+      }
+    }
+    setAddMethodOpen(false);
+    setNewMethod('');
+    setPendingRowId(null);
+  };
+
   return (
     <Box sx={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', p: 2 }}>
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 2, justifyContent: 'space-between' }}>
@@ -392,7 +454,7 @@ export default function PurchaseOrdersPage() {
             onClick={handleUpdatePurchaseOrders}
             disabled={updatingPurchaseOrders}
             startIcon={updatingPurchaseOrders ? <CircularProgress size={16} color="inherit" /> : <span role="img" aria-label="refresh">🔄</span>}
-            sx={{ minWidth: 110, textTransform: 'none' }}
+            sx={{ minWidth: 110, textTransform: 'non3' }}
           >
             Update POs
           </Button>
@@ -456,8 +518,7 @@ export default function PurchaseOrdersPage() {
         <DialogContent sx={{ pt: 2 }}>
           <Select value={bulkStatus} onChange={e => setBulkStatus(e.target.value)} displayEmpty fullWidth size="small">
             <MenuItem value=""><em>Select Status</em></MenuItem>
-            <MenuItem value="awaiting payment">awaiting payment</MenuItem>
-            <MenuItem value="in packing">in packing</MenuItem>
+            <MenuItem value="paid">paid</MenuItem>
           </Select>
         </DialogContent>
         <DialogActions>
@@ -474,6 +535,25 @@ export default function PurchaseOrdersPage() {
         <DialogActions>
           <Button onClick={() => setEtaDialogOpen(false)}>Cancel</Button>
           <Button onClick={async () => { await handleBulkUpdate('eta', bulkEtaValue, setBulkEtaValue); setEtaDialogOpen(false); }} disabled={!bulkEtaValue || bulkUpdating} variant="contained">Update</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Add method dialog for delivery method dropdown */}
+      <Dialog open={addMethodOpen} onClose={() => setAddMethodOpen(false)}>
+        <DialogTitle>Add Delivery Method</DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            margin="dense"
+            label="New Method"
+            fullWidth
+            value={newMethod}
+            onChange={e => setNewMethod(e.target.value)}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setAddMethodOpen(false)}>Cancel</Button>
+          <Button onClick={handleAddMethod} disabled={!newMethod.trim()}>Add</Button>
         </DialogActions>
       </Dialog>
 

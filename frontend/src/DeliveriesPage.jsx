@@ -6,6 +6,7 @@ import { API_BASE } from './apiConfig.js';
 
 export default function DeliveriesPage() {
   const [deliveries, setDeliveries] = useState([]);
+  const [editValues, setEditValues] = useState({});
   const [loading, setLoading] = useState(false);
   const [popoverAnchor, setPopoverAnchor] = useState(null);
   const [popoverPOs, setPopoverPOs] = useState([]);
@@ -45,19 +46,22 @@ export default function DeliveriesPage() {
     })();
   }, []);
 
+  useEffect(() => {
+    // Reset edit values when deliveries change
+    const newEditValues = {};
+    deliveries.forEach(row => {
+      newEditValues[row.id] = {
+        pallet_amount: row.pallet_amount,
+        box_amount: row.box_amount
+      };
+    });
+    setEditValues(newEditValues);
+  }, [deliveries]);
+
   const handleEditCellChange = async (params) => {
-    console.log('[deliveries] edit', params);
-    setDeliveries((prev) => prev.map(row =>
-      row.id === params.id ? { ...row, [params.field]: params.value } : row
-    ));
+    // Only update backend
     const row = deliveries.find(r => r.id === params.id);
     if (row) {
-      console.log('[deliveries] update payload', {
-        supplier_name: row.supplier_name,
-        eta: row.eta,
-        field: params.field,
-        value: params.value
-      });
       await fetch(`${API_BASE}/api/delivery-amounts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -65,12 +69,22 @@ export default function DeliveriesPage() {
           delivery_id: row._id || row.id,
           supplier_name: row.supplier_name,
           eta: row.eta,
-          pallet_amount: params.field === 'pallet_amount' ? params.value : row.pallet_amount,
-          box_amount: params.field === 'box_amount' ? params.value : row.box_amount,
+          pallet_amount: editValues[params.id]?.pallet_amount,
+          box_amount: editValues[params.id]?.box_amount,
         })
       });
       await fetchDeliveries();
     }
+  };
+
+  const handleEditInputChange = (id, field, value) => {
+    setEditValues(prev => ({
+      ...prev,
+      [id]: {
+        ...prev[id],
+        [field]: value
+      }
+    }));
   };
 
   const handleCompleteDelivery = async () => {
@@ -120,7 +134,7 @@ export default function DeliveriesPage() {
                 {grouped[date].length === 0 ? (
                   <Typography sx={{ color: '#bbb', mb: 2 }}>No deliveries scheduled.</Typography>
                 ) : (
-                  <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 3 }}>
+                  <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 3 }}>
                     {grouped[date].map(row => (
                       <Box key={row.id} sx={{ boxShadow: 3, borderRadius: 3, background: '#fff', p: 3, display: 'flex', flexDirection: 'column', gap: 2, position: 'relative' }}>
                         <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
@@ -137,8 +151,9 @@ export default function DeliveriesPage() {
                             label="Pallets"
                             type="number"
                             size="small"
-                            value={row.pallet_amount}
-                            onChange={e => handleEditCellChange({ id: row.id, field: 'pallet_amount', value: e.target.value })}
+                            value={editValues[row.id]?.pallet_amount === 0 ? '' : editValues[row.id]?.pallet_amount ?? ''}
+                            onChange={e => handleEditInputChange(row.id, 'pallet_amount', e.target.value)}
+                            onBlur={e => handleEditCellChange({ id: row.id, field: 'pallet_amount', value: e.target.value })}
                             sx={{ width: 100 }}
                             inputProps={{ min: 0 }}
                           />
@@ -146,8 +161,9 @@ export default function DeliveriesPage() {
                             label="Boxes"
                             type="number"
                             size="small"
-                            value={row.box_amount}
-                            onChange={e => handleEditCellChange({ id: row.id, field: 'box_amount', value: e.target.value })}
+                            value={editValues[row.id]?.box_amount === 0 ? '' : editValues[row.id]?.box_amount ?? ''}
+                            onChange={e => handleEditInputChange(row.id, 'box_amount', e.target.value)}
+                            onBlur={e => handleEditCellChange({ id: row.id, field: 'box_amount', value: e.target.value })}
                             sx={{ width: 100 }}
                             inputProps={{ min: 0 }}
                           />
